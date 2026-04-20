@@ -26,6 +26,7 @@ export default function OnlineOrder() {
     OneSignal.init({ appId: ONESIGNAL_APP_ID, allowLocalhostAsSecureOrigin: true });
     supabase.from('products').select('*').order('name').then(({data}) => data && setMenu(data));
     supabase.from('settings').select('is_open').single().then(({data}) => data && setIsStoreOpen(data.is_open));
+    
     const lastId = localStorage.getItem('last_online_order');
     if (lastId) subscribeOrder(lastId);
   }, []);
@@ -39,12 +40,26 @@ export default function OnlineOrder() {
   const filteredMenu = useMemo(() => activeCategory === 'SEMUA' ? menu : menu.filter(i => i.category?.toUpperCase() === activeCategory), [menu, activeCategory]);
 
   const subscribeOrder = (id) => {
-    supabase.channel(`order-${id}`).on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders', filter: `id=eq.${id}` }, (p) => {
-      setActiveOrder(p.new);
-      setShowStatusModal(true);
-      showNotif("Status pesanan Anda telah diperbarui.", "success");
-    }).subscribe();
-    supabase.from('orders').select('*').eq('id', id).single().then(({data}) => data && setActiveOrder(data));
+    // REAL-TIME LISTENER: HP Pelanggan bakal dengerin perintah dari Store App (Tablet)
+    supabase.channel(`order-${id}`)
+      .on('postgres_changes', { 
+        event: 'UPDATE', 
+        schema: 'public', 
+        table: 'orders', 
+        filter: `id=eq.${id}` 
+      }, (payload) => {
+        setActiveOrder(payload.new);
+        setShowStatusModal(true);
+        showNotif("Status pesanan Anda telah diperbarui.", "success");
+        // Bunyi notif simpel jika browser mengizinkan
+        const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+        audio.play().catch(() => {});
+      })
+      .subscribe();
+
+    supabase.from('orders').select('*').eq('id', id).single().then(({data}) => {
+      if (data) setActiveOrder(data);
+    });
   };
 
   const startPayment = async () => {
@@ -55,19 +70,46 @@ export default function OnlineOrder() {
     const orderId = `ACUN-${Date.now().toString().slice(-4)}`;
     try {
       const { error } = await supabase.from('orders').insert([{ 
-        id: orderId, meja: 99, items: cart, total_harga: cart.reduce((a, b) => a + b.price * b.qty, 0), 
-        payment_status: 'unpaid', status: 'waiting_payment', notes: `Penerima: ${customerName.toUpperCase()}` 
+        id: orderId, 
+        meja: 99, 
+        items: cart, 
+        total_harga: cart.reduce((a, b) => a + b.price * b.qty, 0), 
+        payment_status: 'unpaid', 
+        status: 'waiting_payment', 
+        notes: `PENERIMA: ${customerName.toUpperCase()}` 
       }]);
       if (error) throw error;
+
       localStorage.setItem('last_online_order', orderId);
+
       const res = await fetch('https://stzmwgzvgjrbcuyfhlvq.supabase.co/functions/v1/create-payment', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0em13Z3p2Z2pyYmN1eWZobHZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM2OTExNzYsImV4cCI6MjA3OTI2NzE3Nn0.Sda7ahnvT5qVOwI-EC21313hs4wEpm4NV75sjna4kB4', 'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0em13Z3p2Z2pyYmN1eWZobHZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM2OTExNzYsImV4cCI6MjA3OTI2NzE3Nn0.Sda7ahnvT5qVOwI-EC21313hs4wEpm4NV75sjna4kB4' },
+        headers: { 
+          'Content-Type': 'application/json', 
+          'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0em13Z3p2Z2pyYmN1eWZobHZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM2OTExNzYsImV4cCI6MjA3OTI2NzE3Nn0.Sda7ahnvT5qVOwI-EC21313hs4wEpm4NV75sjna4kB4',
+          'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0em13Z3p2Z2pyYmN1eWZobHZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM2OTExNzYsImV4cCI6MjA3OTI2NzE3Nn0.Sda7ahnvT5qVOwI-EC21313hs4wEpm4NV75sjna4kB4' 
+        },
         body: JSON.stringify({ order_id: orderId, amount: cart.reduce((a, b) => a + b.price * b.qty, 0) })
       });
+
       const data = await res.json();
-      if (data.token) window.snap.pay(data.token, { onSuccess: () => { setCart([]); setIsCartOpen(false); subscribeOrder(orderId); setShowStatusModal(true); setLoading(false); }, onPending: () => setLoading(false), onClose: () => setLoading(false) });
-    } catch (e) { showNotif("Terjadi kesalahan sistem. Silakan coba lagi."); setLoading(false); }
+      if (data.token) {
+        window.snap.pay(data.token, { 
+          onSuccess: () => { 
+            setCart([]); 
+            setIsCartOpen(false); 
+            subscribeOrder(orderId); 
+            setShowStatusModal(true); 
+            setLoading(false); 
+          }, 
+          onPending: () => setLoading(false), 
+          onClose: () => setLoading(false) 
+        });
+      }
+    } catch (e) { 
+      showNotif("Terjadi kesalahan sistem. Silakan coba lagi."); 
+      setLoading(false); 
+    }
   };
 
   return (
@@ -76,7 +118,7 @@ export default function OnlineOrder() {
         <div className="fixed top-6 left-4 right-4 z-[999] animate-in slide-in-from-top duration-300">
           <div className={`p-5 rounded-[2rem] shadow-2xl flex items-center gap-4 border-b-4 ${notification.type === 'error' ? 'bg-white border-rose-600 text-rose-600' : 'bg-indigo-600 border-indigo-900 text-white'}`}>
             {notification.type === 'error' ? <AlertCircle size={20} /> : <CheckCircle2 size={20} />}
-            <p className="text-[11px] flex-1 font-black leading-tight">{notification.msg}</p>
+            <p className="text-[11px] flex-1 font-black leading-tight uppercase">{notification.msg}</p>
             <button onClick={() => setNotification({ ...notification, show: false })}><X size={18}/></button>
           </div>
         </div>
@@ -114,7 +156,7 @@ export default function OnlineOrder() {
         ))}
       </div>
 
-      {/* FLOATING STATUS BANNER (MENCOLOK) */}
+      {/* FLOATING STATUS BANNER */}
       {activeOrder && (
         <div className="fixed bottom-32 left-4 right-4 z-[90] animate-in slide-in-from-bottom duration-500">
           <button onClick={() => setShowStatusModal(true)} className="w-full bg-white border-2 border-indigo-600 p-5 rounded-[2.5rem] shadow-2xl flex items-center gap-4 group active:scale-95 transition-all">
@@ -145,7 +187,7 @@ export default function OnlineOrder() {
       {/* MODAL KERANJANG */}
       {isCartOpen && (
         <div className="fixed inset-0 bg-black/60 z-[250] flex items-end">
-          <div className="bg-white w-full rounded-t-[3.5rem] flex flex-col max-h-[90vh] animate-in slide-in-from-bottom duration-300">
+          <div className="bg-white w-full rounded-t-[3.5rem] flex flex-col max-h-[95vh] animate-in slide-in-from-bottom duration-300 shadow-2xl">
             <div className="flex justify-between items-center p-8 pb-2">
               <h2 className="text-xl italic font-black uppercase">Tinjau Pesanan</h2>
               <button onClick={() => setIsCartOpen(false)} className="p-3 bg-slate-100 rounded-full"><X size={20}/></button>
@@ -155,7 +197,7 @@ export default function OnlineOrder() {
                 <div key={item.id} className="border-b border-slate-50 pb-4 uppercase">
                   <div className="flex justify-between items-start mb-3 text-left">
                     <div className="w-2/3"><h4 className="text-[10px] leading-tight mb-1">{item.name}</h4><p className="text-emerald-600 text-[10px]">Rp {(item.price * item.qty).toLocaleString()}</p></div>
-                    <div className="flex items-center gap-3 bg-slate-100 p-2 rounded-2xl">
+                    <div className="flex items-center gap-3 bg-slate-100 p-2 rounded-2xl shadow-inner">
                       <button onClick={() => setCart(cart.map(c => c.id === item.id ? {...c, qty: Math.max(0, c.qty - 1)} : c).filter(c => c.qty > 0))}><Minus size={14}/></button>
                       <span className="text-xs w-4 text-center">{item.qty}</span>
                       <button onClick={() => setCart(cart.map(c => c.id === item.id ? {...c, qty: c.qty + 1} : c))}><Plus size={14}/></button>
@@ -170,13 +212,13 @@ export default function OnlineOrder() {
             </div>
             <div className="bg-slate-50 p-10 rounded-t-[3.5rem] border-t border-slate-100 font-black italic">
               <div className="flex justify-between items-center mb-6 text-left uppercase"><span className="text-[10px]">Total Pembayaran</span><span className="text-2xl text-emerald-600">Rp {cart.reduce((a, b) => a + b.price * b.qty, 0).toLocaleString()}</span></div>
-              <button onClick={startPayment} disabled={loading} className="w-full py-6 bg-indigo-600 text-white rounded-[2rem] shadow-xl font-black italic tracking-widest">{loading ? "Memproses..." : "Konfirmasi & Bayar"}</button>
+              <button onClick={startPayment} disabled={loading} className="w-full py-6 bg-indigo-600 text-white rounded-[2rem] shadow-xl font-black italic active:scale-95 disabled:opacity-50 uppercase tracking-widest">{loading ? "Memproses..." : "Konfirmasi & Bayar"}</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* STATUS MODAL (DETIL) */}
+      {/* STATUS ORDER MODAL */}
       {showStatusModal && activeOrder && (
         <div className="fixed inset-0 bg-black/95 z-[300] flex items-center justify-center p-6 italic uppercase font-black text-center transition-all">
           <div className="bg-white rounded-[3.5rem] p-10 w-full max-w-sm border-[12px] border-slate-50 shadow-2xl animate-in zoom-in">
@@ -197,7 +239,7 @@ export default function OnlineOrder() {
                      activeOrder.status === 'served' ? 'Siap Diambil' : 'Diproses'}
                 </h3>
             </div>
-            <button onClick={() => setShowStatusModal(false)} className="w-full py-5 bg-slate-900 text-white rounded-[2rem] text-[10px] font-black tracking-widest uppercase">Tutup</button>
+            <button onClick={() => setShowStatusModal(false)} className="w-full py-5 bg-slate-900 text-white rounded-[2rem] text-[10px] font-black tracking-widest uppercase active:scale-95">Tutup</button>
           </div>
         </div>
       )}
