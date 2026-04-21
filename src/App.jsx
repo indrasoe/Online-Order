@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import OneSignal from 'react-onesignal';
 import { 
@@ -21,13 +21,14 @@ export default function OnlineOrder() {
   const [isStoreOpen, setIsStoreOpen] = useState(true);
   const [isCartOpen, setIsCartOpen] = useState(false);
 
-  // HITUNG TOTAL HARGA (Biar gak blank)
   const totalAmount = useMemo(() => cart.reduce((a, b) => a + (b.price * b.qty), 0), [cart]);
 
   useEffect(() => {
     OneSignal.init({ appId: ONESIGNAL_APP_ID, allowLocalhostAsSecureOrigin: true });
     supabase.from('products').select('*').order('name').then(({data}) => data && setMenu(data));
-    supabase.from('settings').select('is_open').single().then(({data}) => data && setIsStoreOpen(data.is_open));
+    supabase.from('settings').select('value').eq('key', 'is_open').single().then(({data}) => {
+        if(data) setIsStoreOpen(data.value === 'true');
+    });
     const lastId = localStorage.getItem('last_online_order');
     if (lastId) subscribeOrder(lastId);
   }, []);
@@ -36,6 +37,7 @@ export default function OnlineOrder() {
     if (window.OneSignal) {
       OneSignal.User.addTag("order_id", id);
     }
+    // Listen status updates from Admin
     supabase.channel(`order-${id}`).on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders', filter: `id=eq.${id}` }, (p) => {
       setActiveOrder(p.new);
       if (p.new.status === 'completed') {
@@ -43,6 +45,7 @@ export default function OnlineOrder() {
         setActiveOrder(null);
       }
     }).subscribe();
+
     supabase.from('orders').select('*').eq('id', id).single().then(({data}) => {
         if (data && data.status !== 'completed') setActiveOrder(data);
     });
@@ -50,8 +53,11 @@ export default function OnlineOrder() {
 
   const startPayment = async () => {
     if (!customerName.trim()) return setNotification({ show: true, msg: 'Mohon isi nama Anda.', type: 'error' });
+    if (cart.length === 0) return;
+    
     setLoading(true);
-    const orderId = `ACUN-${Date.now().toString().slice(-4)}`;
+    // Kita buat ID yang konsisten untuk Midtrans & Supabase
+    const orderId = `ACUN-WEB-${Date.now().toString().slice(-6)}`;
 
     try {
       const res = await fetch('https://stzmwgzvgjrbcuyfhlvq.supabase.co/functions/v1/create-payment', {
@@ -69,11 +75,15 @@ export default function OnlineOrder() {
 
       window.snap.pay(data.token, {
         onSuccess: async () => {
-          // INSERT KE DB HANYA SAAT BERHASIL BAYAR
+          // ✅ FIX: Pastikan format notes sesuai dengan filter Admin agar muncul di tab HOME
           const { error } = await supabase.from('orders').insert([{ 
-            id: orderId, meja: 99, items: cart, total_harga: totalAmount, 
-            payment_status: 'paid', status: 'waiting_payment', 
-            notes: `PENERIMA: ${customerName.toUpperCase()}` 
+            id: orderId, 
+            meja: 99, 
+            items: cart, 
+            total_harga: totalAmount, 
+            payment_status: 'paid', 
+            status: 'waiting_payment', 
+            notes: `PENERIMA: ${customerName.toUpperCase()} | ONLINE ORDER` // String "PENERIMA" ini kuncinya
           }]);
 
           if (!error) {
@@ -82,11 +92,14 @@ export default function OnlineOrder() {
             localStorage.setItem('last_online_order', orderId);
             subscribeOrder(orderId);
             setShowStatusModal(true);
+          } else {
+            console.error("Supabase Error:", error);
           }
           setLoading(false);
         },
         onPending: () => setLoading(false),
-        onClose: () => setLoading(false)
+        onClose: () => setLoading(false),
+        onError: () => setLoading(false)
       });
     } catch (e) {
       setNotification({ show: true, msg: e.message, type: 'error' });
