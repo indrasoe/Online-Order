@@ -6,10 +6,10 @@ import {
   X, MessageSquare, UtensilsCrossed, AlertCircle, CheckCircle2, ChevronRight, ShoppingBag
 } from 'lucide-react';
 
-const supabase = createClient('https://stzmwgzvgjrbcuyfhlvq.supabase.co', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0em13Z3p2Z2pyYmN1eWZobHZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM2OTExNzYsImV4cCI6MjA3OTI2NzE3Nn0.Sda7ahnvT5qVOwI-EC21313hs4wEpm4NV75sjna4kB4');
-const ONESIGNAL_APP_ID = "5a2bb3f2-9c87-404b-a5cd-adf77f648940";
 const SUPABASE_URL = 'https://stzmwgzvgjrbcuyfhlvq.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0em13Z3p2Z2pyYmN1eWZobHZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM2OTExNzYsImV4cCI6MjA3OTI2NzE3Nn0.Sda7ahnvT5qVOwI-EC21313hs4wEpm4NV75sjna4kB4';
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const ONESIGNAL_APP_ID = "5a2bb3f2-9c87-404b-a5cd-adf77f648940";
 
 export default function OnlineOrder() {
   const [menu, setMenu] = useState([]);
@@ -39,7 +39,6 @@ export default function OnlineOrder() {
     if (window.OneSignal) {
       OneSignal.User.addTag("order_id", id);
     }
-    // Listen status updates from Admin / Webhook
     supabase.channel(`order-${id}`).on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders', filter: `id=eq.${id}` }, (p) => {
       setActiveOrder(p.new);
       if (p.new.status === 'completed') {
@@ -61,20 +60,21 @@ export default function OnlineOrder() {
     const orderId = `ACUN-WEB-${Date.now().toString().slice(-6)}`;
 
     try {
-      // ✅ LANGKAH 1: INSERT DULU KE DATABASE (Anti-Gagal)
+      // 1. MASUKKAN KE DATABASE DENGAN STATUS 'GHOST'
+      // Status 'payment_pending' tidak akan muncul di tablet Admin (Store-App)
       const { error: dbError } = await supabase.from('orders').insert([{ 
         id: orderId, 
         meja: 99, 
         items: cart, 
         total_harga: totalAmount, 
         payment_status: 'unpaid', 
-        status: 'waiting_payment', 
-        notes: `PENERIMA: ${customerName.toUpperCase()} | ONLINE ORDER` 
+        status: 'payment_pending', 
+        notes: `PENERIMA: ${customerName.toUpperCase()} | WEB ORDER` 
       }]);
 
-      if (dbError) throw new Error("Gagal simpan pesanan ke database");
+      if (dbError) throw new Error("Gagal kirim data ke server.");
 
-      // ✅ LANGKAH 2: AMBIL TOKEN MIDTRANS
+      // 2. AMBIL TOKEN MIDTRANS
       const res = await fetch(`${SUPABASE_URL}/functions/v1/create-payment`, {
         method: 'POST',
         headers: { 
@@ -88,11 +88,12 @@ export default function OnlineOrder() {
       const data = await res.json();
       if (!data.token) throw new Error("Gagal mengambil token pembayaran.");
 
-      // ✅ LANGKAH 3: BUKA JENDELA BAYAR
+      // 3. BUKA JENDELA MIDTRANS
       window.snap.pay(data.token, {
         onSuccess: () => {
-          // Gak perlu insert lagi, karena datanya udah ada di database dari Langkah 1
-          // Webhook Midtrans nanti yang bakal ganti statusnya jadi 'paid' otomatis
+          // Gak usah lapor Supabase lagi di sini.
+          // Biar WEBHOOK (Server-to-Server) yang ubah status jadi 'waiting_payment'
+          // Begitu lunas, tablet Admin lo otomatis bunyi & pesanan nongol.
           setCart([]);
           setIsCartOpen(false);
           localStorage.setItem('last_online_order', orderId);
@@ -100,15 +101,9 @@ export default function OnlineOrder() {
           setShowStatusModal(true);
           setLoading(false);
         },
-        onPending: () => {
-            setLoading(false);
-            setNotification({ show: true, msg: 'Selesaikan pembayaran Anda.', type: 'info' });
-        },
+        onPending: () => setLoading(false),
         onClose: () => setLoading(false),
-        onError: () => {
-            setLoading(false);
-            setNotification({ show: true, msg: 'Terjadi kesalahan pembayaran.', type: 'error' });
-        }
+        onError: () => setLoading(false)
       });
     } catch (e) {
       setNotification({ show: true, msg: e.message, type: 'error' });
@@ -168,7 +163,8 @@ export default function OnlineOrder() {
                 <div className="flex items-center gap-3">
                     <div className="bg-indigo-100 p-2 rounded-lg text-indigo-600"><Clock size={16} className={activeOrder.status === 'on_process' ? 'animate-spin' : ''} /></div>
                     <div className="text-left"><p className="text-[10px] font-black text-indigo-600 leading-none">
-                        {activeOrder.status === 'waiting_payment' ? 'PESANAN TERKIRIM' : 
+                        {activeOrder.status === 'payment_pending' ? 'MENUNGGU PEMBAYARAN' : 
+                         activeOrder.status === 'waiting_payment' ? 'PESANAN TERKIRIM' : 
                          activeOrder.status === 'on_process' ? 'SEDANG DISIAPKAN' : 
                          activeOrder.status === 'served' ? 'SIAP DIAMBIL!' : 'DIPROSES'}
                     </p></div>
@@ -236,7 +232,8 @@ export default function OnlineOrder() {
             </div>
             <div className="bg-slate-50 p-8 rounded-[2.5rem] mb-8 font-black uppercase italic shadow-inner">
                 <h3 className={`text-2xl leading-none ${activeOrder.status === 'served' ? 'text-emerald-600' : 'text-indigo-600'}`}>
-                    {activeOrder.status === 'waiting_payment' ? 'DIPROSES' : 
+                    {activeOrder.status === 'payment_pending' ? 'BELUM BAYAR' : 
+                     activeOrder.status === 'waiting_payment' ? 'DITERIMA' : 
                      activeOrder.status === 'on_process' ? 'DISIAPKAN' : 
                      activeOrder.status === 'served' ? 'SIAP AMBIL!' : 'SELESAI'}
                 </h3>
