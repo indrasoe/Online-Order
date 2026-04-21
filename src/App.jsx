@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import OneSignal from 'react-onesignal';
 import { 
@@ -8,6 +8,8 @@ import {
 
 const supabase = createClient('https://stzmwgzvgjrbcuyfhlvq.supabase.co', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0em13Z3p2Z2pyYmN1eWZobHZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM2OTExNzYsImV4cCI6MjA3OTI2NzE3Nn0.Sda7ahnvT5qVOwI-EC21313hs4wEpm4NV75sjna4kB4');
 const ONESIGNAL_APP_ID = "5a2bb3f2-9c87-404b-a5cd-adf77f648940";
+const SUPABASE_URL = 'https://stzmwgzvgjrbcuyfhlvq.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0em13Z3p2Z2pyYmN1eWZobHZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM2OTExNzYsImV4cCI6MjA3OTI2NzE3Nn0.Sda7ahnvT5qVOwI-EC21313hs4wEpm4NV75sjna4kB4';
 
 export default function OnlineOrder() {
   const [menu, setMenu] = useState([]);
@@ -37,7 +39,7 @@ export default function OnlineOrder() {
     if (window.OneSignal) {
       OneSignal.User.addTag("order_id", id);
     }
-    // Listen status updates from Admin
+    // Listen status updates from Admin / Webhook
     supabase.channel(`order-${id}`).on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders', filter: `id=eq.${id}` }, (p) => {
       setActiveOrder(p.new);
       if (p.new.status === 'completed') {
@@ -56,16 +58,29 @@ export default function OnlineOrder() {
     if (cart.length === 0) return;
     
     setLoading(true);
-    // Kita buat ID yang konsisten untuk Midtrans & Supabase
     const orderId = `ACUN-WEB-${Date.now().toString().slice(-6)}`;
 
     try {
-      const res = await fetch('https://stzmwgzvgjrbcuyfhlvq.supabase.co/functions/v1/create-payment', {
+      // ✅ LANGKAH 1: INSERT DULU KE DATABASE (Anti-Gagal)
+      const { error: dbError } = await supabase.from('orders').insert([{ 
+        id: orderId, 
+        meja: 99, 
+        items: cart, 
+        total_harga: totalAmount, 
+        payment_status: 'unpaid', 
+        status: 'waiting_payment', 
+        notes: `PENERIMA: ${customerName.toUpperCase()} | ONLINE ORDER` 
+      }]);
+
+      if (dbError) throw new Error("Gagal simpan pesanan ke database");
+
+      // ✅ LANGKAH 2: AMBIL TOKEN MIDTRANS
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/create-payment`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json', 
-          'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0em13Z3p2Z2pyYmN1eWZobHZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM2OTExNzYsImV4cCI6MjA3OTI2NzE3Nn0.Sda7ahnvT5qVOwI-EC21313hs4wEpm4NV75sjna4kB4',
-          'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0em13Z3p2Z2pyYmN1eWZobHZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM2OTExNzYsImV4cCI6MjA3OTI2NzE3Nn0.Sda7ahnvT5qVOwI-EC21313hs4wEpm4NV75sjna4kB4' 
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}` 
         },
         body: JSON.stringify({ order_id: orderId, amount: totalAmount })
       });
@@ -73,33 +88,27 @@ export default function OnlineOrder() {
       const data = await res.json();
       if (!data.token) throw new Error("Gagal mengambil token pembayaran.");
 
+      // ✅ LANGKAH 3: BUKA JENDELA BAYAR
       window.snap.pay(data.token, {
-        onSuccess: async () => {
-          // ✅ FIX: Pastikan format notes sesuai dengan filter Admin agar muncul di tab HOME
-          const { error } = await supabase.from('orders').insert([{ 
-            id: orderId, 
-            meja: 99, 
-            items: cart, 
-            total_harga: totalAmount, 
-            payment_status: 'paid', 
-            status: 'waiting_payment', 
-            notes: `PENERIMA: ${customerName.toUpperCase()} | ONLINE ORDER` // String "PENERIMA" ini kuncinya
-          }]);
-
-          if (!error) {
-            setCart([]);
-            setIsCartOpen(false);
-            localStorage.setItem('last_online_order', orderId);
-            subscribeOrder(orderId);
-            setShowStatusModal(true);
-          } else {
-            console.error("Supabase Error:", error);
-          }
+        onSuccess: () => {
+          // Gak perlu insert lagi, karena datanya udah ada di database dari Langkah 1
+          // Webhook Midtrans nanti yang bakal ganti statusnya jadi 'paid' otomatis
+          setCart([]);
+          setIsCartOpen(false);
+          localStorage.setItem('last_online_order', orderId);
+          subscribeOrder(orderId);
+          setShowStatusModal(true);
           setLoading(false);
         },
-        onPending: () => setLoading(false),
+        onPending: () => {
+            setLoading(false);
+            setNotification({ show: true, msg: 'Selesaikan pembayaran Anda.', type: 'info' });
+        },
         onClose: () => setLoading(false),
-        onError: () => setLoading(false)
+        onError: () => {
+            setLoading(false);
+            setNotification({ show: true, msg: 'Terjadi kesalahan pembayaran.', type: 'error' });
+        }
       });
     } catch (e) {
       setNotification({ show: true, msg: e.message, type: 'error' });
@@ -159,7 +168,7 @@ export default function OnlineOrder() {
                 <div className="flex items-center gap-3">
                     <div className="bg-indigo-100 p-2 rounded-lg text-indigo-600"><Clock size={16} className={activeOrder.status === 'on_process' ? 'animate-spin' : ''} /></div>
                     <div className="text-left"><p className="text-[10px] font-black text-indigo-600 leading-none">
-                        {activeOrder.status === 'waiting_payment' ? 'MENUNGGU KONFIRMASI' : 
+                        {activeOrder.status === 'waiting_payment' ? 'PESANAN TERKIRIM' : 
                          activeOrder.status === 'on_process' ? 'SEDANG DISIAPKAN' : 
                          activeOrder.status === 'served' ? 'SIAP DIAMBIL!' : 'DIPROSES'}
                     </p></div>
